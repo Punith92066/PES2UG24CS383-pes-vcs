@@ -375,8 +375,10 @@ The test program verifies:
 - Integrity checking (detects corrupted objects)
 
 **📸 Screenshot 1A:** Output of `./test_objects` showing all tests passing.
+<img width="945" height="250" alt="Screenshot 2026-04-21 123132" src="https://github.com/user-attachments/assets/9e4be802-afc2-4e58-9449-2ee440c3411a" />
 
 **📸 Screenshot 1B:** `find .pes/objects -type f` showing the sharded directory structure.
+<img width="954" height="543" alt="Screenshot 2026-04-21 123147" src="https://github.com/user-attachments/assets/a864cb50-2c69-49f3-8425-2238024a501a" />
 
 ---
 
@@ -407,8 +409,11 @@ The test program verifies:
 - Deterministic serialization (same entries in any order → identical output)
 
 **📸 Screenshot 2A:** Output of `./test_tree` showing all tests passing.
+<img width="946" height="342" alt="Screenshot 2026-04-21 123159" src="https://github.com/user-attachments/assets/681c68a3-5fc0-452d-843e-782124cd0bd9" />
+
 
 **📸 Screenshot 2B:** Pick a tree object from `find .pes/objects -type f` and run `xxd .pes/objects/XX/YYY... | head -20` to show the raw binary format.
+<img width="948" height="145" alt="Screenshot 2026-04-21 123220" src="https://github.com/user-attachments/assets/6355e289-278b-42a8-9e19-f1eb6c996b00" />
 
 ---
 
@@ -465,8 +470,11 @@ cat .pes/index    # Human-readable text format
 ```
 
 **📸 Screenshot 3A:** Run `./pes init`, `./pes add file1.txt file2.txt`, `./pes status` — show the output.
+<img width="950" height="887" alt="Screenshot 2026-04-21 123254" src="https://github.com/user-attachments/assets/759dc5d8-ec2f-4888-8c28-ac23af8565c9" />
+
 
 **📸 Screenshot 3B:** `cat .pes/index` showing the text-format index with your entries.
+<img width="951" height="208" alt="Screenshot 2026-04-21 123306" src="https://github.com/user-attachments/assets/e96b6d37-6767-4f20-9d53-53c0bd99c524" />
 
 ---
 
@@ -516,32 +524,113 @@ make test-integration
 ```
 
 **📸 Screenshot 4A:** Output of `./pes log` showing three commits with hashes, authors, timestamps, and messages.
+<img width="948" height="563" alt="Screenshot 2026-04-21 123323" src="https://github.com/user-attachments/assets/e835b778-8c98-4c14-aae9-e2d50b705a95" />
+
 
 **📸 Screenshot 4B:** `find .pes -type f | sort` showing object store growth after three commits.
+<img width="948" height="493" alt="Screenshot 2026-04-21 123340" src="https://github.com/user-attachments/assets/c9968615-77c0-4ffa-b00f-e2c891c38cef" />
 
 **📸 Screenshot 4C:** `cat .pes/refs/heads/main` and `cat .pes/HEAD` showing the reference chain.
+<img width="951" height="180" alt="Screenshot 2026-04-21 123353" src="https://github.com/user-attachments/assets/543bd2f2-8fd8-49b9-b24d-f1ac6e9fac70" />
 
 ---
 
-## Phase 5 & 6: Analysis-Only Questions
+Phase 5
+Q5.1: A branch is a pointer file under .pes/refs/heads/<branch>, and HEAD usually stores ref: refs/heads/<branch>.
 
-The following questions cover filesystem concepts beyond the implementation scope of this lab. Answer them in writing — no code required.
+To implement pes checkout <branch>:
 
-### Branching and Checkout
+Validate branch exists: read .pes/refs/heads/<branch> and parse commit hash.
+Resolve target commit and its tree by reading commit object, then tree object(s).
+Check for dirty/conflicting working state before overwriting files.
+Update working directory to match target tree:
+Create/update tracked files from target blobs.
+Remove tracked files that do not exist in target tree.
+Create/remove directories as needed.
+Restore executable bit from tree mode (100755 vs 100644).
+Rewrite index to match checked-out tree snapshot.
+Update HEAD:
+Normal checkout: write ref: refs/heads/<branch> to .pes/HEAD.
+Why this is complex:
 
-**Q5.1:** A branch in Git is just a file in `.git/refs/heads/` containing a commit hash. Creating a branch is creating a file. Given this, how would you implement `pes checkout <branch>` — what files need to change in `.pes/`, and what must happen to the working directory? What makes this operation complex?
+It is not just pointer movement; it is a full filesystem transformation with safety checks.
+You must preserve user data by detecting conflicts with local changes.
+Nested trees require recursive traversal and path reconstruction.
+Correct metadata (mode, deletions, directory cleanup) must be handled atomically enough to avoid partial states.
 
-**Q5.2:** When switching branches, the working directory must be updated to match the target branch's tree. If the user has uncommitted changes to a tracked file, and that file differs between branches, checkout must refuse. Describe how you would detect this "dirty working directory" conflict using only the index and the object store.
+Q5.2: Conflict detection using index + object store:
 
-**Q5.3:** "Detached HEAD" means HEAD contains a commit hash directly instead of a branch reference. What happens if you make commits in this state? How could a user recover those commits?
+Let H be current HEAD tree and T be target branch tree.
+For each tracked path in index:
+Compare working file metadata/content to index entry.
+If different, path is locally dirty.
+For each dirty path, check whether switching branches would touch it:
+Path differs between H and T (added/removed/changed blob hash or mode), or
+Path exists in working tree but target needs to write/delete at that path.
+If both true (dirty + would-be-overwritten), refuse checkout and print conflicting paths.
+Practical check:
 
-### Garbage Collection and Space Reclamation
+Fast path: metadata compare (mtime, size) against index.
+Safe path: recompute blob hash from working file and compare with index hash before deciding clean/dirty.
+This mirrors Git behavior: checkout aborts when local uncommitted work would be lost.
 
-**Q6.1:** Over time, the object store accumulates unreachable objects — blobs, trees, or commits that no branch points to (directly or transitively). Describe an algorithm to find and delete these objects. What data structure would you use to track "reachable" hashes efficiently? For a repository with 100,000 commits and 50 branches, estimate how many objects you'd need to visit.
+Q5.3: Detached HEAD means .pes/HEAD contains a commit hash directly instead of a branch ref.
 
-**Q6.2:** Why is it dangerous to run garbage collection concurrently with a commit operation? Describe a race condition where GC could delete an object that a concurrent commit is about to reference. How does Git's real GC avoid this?
+If you commit in detached HEAD:
 
----
+New commits are created normally, but no branch file advances.
+HEAD moves along this anonymous chain.
+These commits are easy to lose later (unreachable after switching away) unless referenced.
+Recovery options:
+
+Immediately create a branch pointing to current detached commit:
+write hash to .pes/refs/heads/<new-branch>
+set HEAD to ref: refs/heads/<new-branch>
+If already switched away, recover from reflog-like history (if implemented) or any saved commit hash and create a branch at that hash.
+
+Phase 6
+Q6.1: Algorithm to delete unreachable objects (mark-and-sweep):
+
+Build root set of reachable commits:
+all hashes in .pes/refs/heads/*
+detached HEAD hash if applicable
+optional safety roots (in-progress operations, reflog entries)
+Mark phase (graph traversal):
+For each root commit, DFS/BFS:
+mark commit hash
+follow parent commit hash(es)
+follow tree hash
+For each marked tree:
+parse entries
+mark child tree hashes and blob hashes
+Sweep phase:
+enumerate .pes/objects/**
+delete any object whose hash is not in reachable set
+Data structure:
+
+Hash set of object IDs for O(1) membership checks.
+Queue/stack for traversal.
+Scale estimate (100,000 commits, 50 branches):
+
+Commits visited is at most number of unique commits reachable, not 50 x 100,000.
+In worst case, about 100,000 commits plus all referenced trees/blobs.
+Total visited objects can be millions if each commit introduces many unique trees/blobs.
+
+Q6.2: Why concurrent GC with commit is dangerous:
+
+Race example:
+
+Commit process writes new tree/blob objects first.
+Before it writes commit object and updates branch ref, GC starts mark from refs.
+New objects are not yet reachable from any ref, so GC classifies them unreachable.
+GC deletes those objects.
+Commit then writes ref to commit that points to now-missing objects, corrupting history.
+How real Git avoids this (high level):
+
+Uses reachability protections from temporary refs and reflogs.
+Uses object mtime grace periods (recent objects are kept).
+Coordinates maintenance with repository locking and safe operation windows.
+Runs prune conservatively to avoid deleting objects that may become referenced imminently
 
 ## Submission Checklist
 
