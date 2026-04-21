@@ -135,10 +135,38 @@ int index_status(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_load(Index *index) {
-    // TODO: Implement index loading
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    index->count = 0;
+
+    FILE *f = fopen(".pes/index", "r");
+    if (!f) {
+        // If index doesn't exist → empty index (NOT error)
+        return 0;
+    }
+
+    char hash_hex[HASH_HEX_SIZE + 1];
+
+    while (index->count < MAX_INDEX_ENTRIES) {
+        IndexEntry *e = &index->entries[index->count];
+
+        int ret = fscanf(f, "%o %64s %ld %ld %s\n",
+            &e->mode,
+            hash_hex,
+            &e->mtime_sec,
+            &e->size,
+            e->path);
+
+        if (ret != 5) break;
+
+        if (hex_to_hash(hash_hex, &e->id) != 0) {
+            fclose(f);
+            return -1;
+        }
+
+        index->count++;
+    }
+
+    fclose(f);
+    return 0;
 }
 
 // Save the index to .pes/index atomically.
@@ -151,11 +179,40 @@ int index_load(Index *index) {
 //   - rename                           : atomically moving the temp file over the old index
 //
 // Returns 0 on success, -1 on error.
+static int compare_entries(const void *a, const void *b) {
+    return strcmp(((IndexEntry *)a)->path, ((IndexEntry *)b)->path);
+}
+
 int index_save(const Index *index) {
-    // TODO: Implement atomic index saving
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    // Make sorted copy
+    Index sorted = *index;
+    qsort(sorted.entries, sorted.count, sizeof(IndexEntry), compare_entries);
+
+    FILE *f = fopen(".pes/index.tmp", "w");
+    if (!f) return -1;
+
+    for (int i = 0; i < sorted.count; i++) {
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&sorted.entries[i].id, hex);
+
+        fprintf(f, "%o %s %ld %ld %s\n",
+            sorted.entries[i].mode,
+            hex,
+            sorted.entries[i].mtime_sec,
+            sorted.entries[i].size,
+            sorted.entries[i].path);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    // Atomic rename
+    if (rename(".pes/index.tmp", ".pes/index") != 0) {
+        return -1;
+    }
+
+    return 0;
 }
 
 // Stage a file for the next commit.
@@ -168,8 +225,53 @@ int index_save(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_add(Index *index, const char *path) {
-    // TODO: Implement file staging
-    // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        perror("stat");
+        return -1;
+    }
+
+    // Read file content
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    char *buf = malloc(st.st_size);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
+    fread(buf, 1, st.st_size, f);
+    fclose(f);
+
+    // Store as blob
+    ObjectID id;
+    if (object_write(OBJ_BLOB, buf, st.st_size, &id) != 0) {
+        free(buf);
+        return -1;
+    }
+
+    free(buf);
+
+    // Check if already exists
+    IndexEntry *existing = index_find(index, path);
+
+    if (existing) {
+        existing->id = id;
+        existing->mtime_sec = st.st_mtime;
+        existing->size = st.st_size;
+        existing->mode = get_file_mode(path);
+    } else {
+        if (index->count >= MAX_INDEX_ENTRIES) return -1;
+
+        IndexEntry *e = &index->entries[index->count++];
+
+        e->id = id;
+        e->mtime_sec = st.st_mtime;
+        e->size = st.st_size;
+        e->mode = get_file_mode(path);
+        strcpy(e->path, path);
+    }
+
+    return index_save(index);
 }
